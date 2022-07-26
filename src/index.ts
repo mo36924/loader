@@ -37,6 +37,7 @@ type Load = (
   nextLoad: (url: string, context: { conditions: string[]; format: string; importAssertions: any }) => LoadResult,
 ) => LoadResult;
 
+const files: { [url: string]: string | Buffer } = Object.create(null);
 const ee = new EventEmitter();
 const onWriteFile: AsyncIterableIterator<[string]> = on(ee, "writeFile");
 const diagnosticReporter = (ts as any).createDiagnosticReporter(ts.sys, true);
@@ -123,8 +124,6 @@ ts.createWatchProgram(
     },
   ),
 );
-
-const files: { [url: string]: string | Buffer } = Object.create(null);
 
 const resolve: Resolve = (specifier: string, context, nextResolve) =>
   /(\.ts|\?\d+)$/.test(specifier)
