@@ -37,102 +37,106 @@ type Load = (
   nextLoad: (url: string, context: { conditions: string[]; format: string; importAssertions: any }) => LoadResult,
 ) => LoadResult;
 
-const files: { [url: string]: string | Buffer } = Object.create(null);
-const ee = new EventEmitter();
-const onWriteFile: AsyncIterableIterator<[string]> = on(ee, "writeFile");
-const diagnosticReporter = (ts as any).createDiagnosticReporter(ts.sys, true);
+const init = () => {
+  const files: { [url: string]: string | Buffer } = Object.create(null);
+  const ee = new EventEmitter();
+  const onWriteFile: AsyncIterableIterator<[string]> = on(ee, "writeFile");
+  const diagnosticReporter = (ts as any).createDiagnosticReporter(ts.sys, true);
 
-const customTransformers: CustomTransformers = {
-  before: [
-    (context) => (sourceFile) =>
-      ts.visitNode(sourceFile, function visitor(node): ts.Node {
-        if (
-          (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
-          node.moduleSpecifier &&
-          ts.isStringLiteral(node.moduleSpecifier)
-        ) {
-          const resolvedModules: ResolvedModules = (sourceFile as any).resolvedModules;
-          const resolvedModule = resolvedModules.get(node.moduleSpecifier.text);
+  const customTransformers: CustomTransformers = {
+    before: [
+      (context) => (sourceFile) =>
+        ts.visitNode(sourceFile, function visitor(node): ts.Node {
+          if (
+            (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
+            node.moduleSpecifier &&
+            ts.isStringLiteral(node.moduleSpecifier)
+          ) {
+            const resolvedModules: ResolvedModules = (sourceFile as any).resolvedModules;
+            const resolvedModule = resolvedModules.get(node.moduleSpecifier.text);
 
-          if (resolvedModule && !resolvedModule.isExternalLibraryImport) {
-            if (ts.isImportDeclaration(node)) {
-              return context.factory.updateImportDeclaration(
-                node,
-                node.decorators,
-                node.modifiers,
-                node.importClause,
-                context.factory.createStringLiteral(resolvedModule.resolvedFileName),
-                node.assertClause,
-              );
-            } else {
-              return context.factory.updateExportDeclaration(
-                node,
-                node.decorators,
-                node.modifiers,
-                node.isTypeOnly,
-                node.exportClause,
-                context.factory.createStringLiteral(resolvedModule.resolvedFileName),
-                node.assertClause,
-              );
+            if (resolvedModule && !resolvedModule.isExternalLibraryImport) {
+              if (ts.isImportDeclaration(node)) {
+                return context.factory.updateImportDeclaration(
+                  node,
+                  node.decorators,
+                  node.modifiers,
+                  node.importClause,
+                  context.factory.createStringLiteral(resolvedModule.resolvedFileName),
+                  node.assertClause,
+                );
+              } else {
+                return context.factory.updateExportDeclaration(
+                  node,
+                  node.decorators,
+                  node.modifiers,
+                  node.isTypeOnly,
+                  node.exportClause,
+                  context.factory.createStringLiteral(resolvedModule.resolvedFileName),
+                  node.assertClause,
+                );
+              }
             }
           }
+
+          return ts.visitEachChild(node, visitor, context);
+        }),
+      html(),
+    ],
+  };
+
+  ts.createWatchProgram(
+    ts.createWatchCompilerHost(
+      "tsconfig.json",
+      {
+        noEmit: false,
+        sourceMap: false,
+        inlineSourceMap: true,
+        inlineSources: true,
+      },
+      {
+        ...ts.sys,
+        writeFile(path: string, data: string) {
+          const url = pathToFileURL(path.replace(/\.js$/, ".ts")).href;
+          files[url] = data;
+          ee.emit("writeFile", url);
+        },
+      },
+      (...args: Parameters<typeof ts.createEmitAndSemanticDiagnosticsBuilderProgram>) => {
+        const program = ts.createEmitAndSemanticDiagnosticsBuilderProgram(...args);
+        const emit = program.emit;
+
+        program.emit = (targetSourceFile, writeFile, cancellationToken, emitOnlyDtsFiles, _customTransformers) =>
+          emit(targetSourceFile, writeFile, cancellationToken, emitOnlyDtsFiles, customTransformers);
+
+        return program;
+      },
+      diagnosticReporter,
+      async (diagnostic, _newLine, _options, errorCount) => {
+        if (errorCount === undefined) {
+          ts.sys.clearScreen!();
         }
 
-        return ts.visitEachChild(node, visitor, context);
-      }),
-    html(),
-  ],
-};
+        diagnosticReporter(diagnostic);
+        process.exitCode = errorCount;
 
-ts.createWatchProgram(
-  ts.createWatchCompilerHost(
-    "tsconfig.json",
-    {
-      noEmit: false,
-      sourceMap: false,
-      inlineSourceMap: true,
-      inlineSources: true,
-    },
-    {
-      ...ts.sys,
-      writeFile(path: string, data: string) {
-        const url = pathToFileURL(path.replace(/\.js$/, ".ts")).href;
-        files[url] = data;
-        ee.emit("writeFile", url);
+        if (errorCount === 0) {
+        }
       },
-    },
-    (...args: Parameters<typeof ts.createEmitAndSemanticDiagnosticsBuilderProgram>) => {
-      const program = ts.createEmitAndSemanticDiagnosticsBuilderProgram(...args);
-      const emit = program.emit;
+    ),
+  );
 
-      program.emit = (targetSourceFile, writeFile, cancellationToken, emitOnlyDtsFiles, _customTransformers) =>
-        emit(targetSourceFile, writeFile, cancellationToken, emitOnlyDtsFiles, customTransformers);
+  const resolve: Resolve = (specifier: string, context, nextResolve) =>
+    /(\.ts|\?\d+)$/.test(specifier)
+      ? { format: "module", shortCircuit: true, url: new URL(specifier, context.parentURL).href }
+      : nextResolve(specifier, context);
 
-      return program;
-    },
-    diagnosticReporter,
-    async (diagnostic, _newLine, _options, errorCount) => {
-      if (errorCount === undefined) {
-        ts.sys.clearScreen!();
-      }
+  const load: Load = (url, context, nextLoad) => {
+    url = url.replace(/\?\d+$/, "");
+    return url in files ? { format: "module", shortCircuit: true, source: files[url] } : nextLoad(url, context);
+  };
 
-      diagnosticReporter(diagnostic);
-      process.exitCode = errorCount;
-
-      if (errorCount === 0) {
-      }
-    },
-  ),
-);
-
-const resolve: Resolve = (specifier: string, context, nextResolve) =>
-  /(\.ts|\?\d+)$/.test(specifier)
-    ? { format: "module", shortCircuit: true, url: new URL(specifier, context.parentURL).href }
-    : nextResolve(specifier, context);
-
-const load: Load = (url, context, nextLoad) => {
-  url = url.replace(/\?\d+$/, "");
-  return url in files ? { format: "module", shortCircuit: true, source: files[url] } : nextLoad(url, context);
+  return { onWriteFile, files, resolve, load };
 };
 
-export { onWriteFile, files, resolve, load };
+export const { files, onWriteFile, resolve, load }: ReturnType<typeof init> = ((globalThis as any).__loader ??= init());
